@@ -1,0 +1,351 @@
+---
+title: "Final Summer Output"
+output: html_document
+date: "2024-07-30"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+In Summer 2024, I looked at the Queensland Travel Survay database from 2021 (https://www.data.qld.gov.au/dataset/queensland-household-travel-survey-series)
+Using this data I broke down every aspect of the dataset with the exception of the "Duration" value, which we could not figure out the significance of.
+
+First, I installed and libraried all of the needed packages and loaded in the Queensland dataset.
+```{r}
+library(sf)
+library(tidyverse)
+library(readxl)
+library(spData)
+library(spDataLarge)
+library(ozmaps)
+library(ggplot2)
+library(reshape2)
+library(stplanr)
+library(tmap)
+library(sfnetworks)
+X5_QTS_TRIPS <- read_excel("~/5_QTS_TRIPS.xlsx")
+dat <- st_read("C:\\Users\\jjsps\\Downloads\\SA1_2021_AUST_SHP_GDA2020\\SA1_2021_AUST_GDA2020.shp")
+```
+
+Then, now that I had the giant dataset, I wanted to see exactly what the different statistical units, or SA's looked like on a map of Queensland Australia, so importing the spacial data for Queensland, I plotted all four levels of SA's. This was done using the base r plot function since there are so many different SA1 codes that ggplot wasn't working.
+```{r}
+queens_dat <- filter(dat, STE_NAME21 == "Queensland")
+plot(queens_dat["SA1_CODE21"])
+plot(queens_dat["SA2_CODE21"])
+plot(queens_dat["SA3_CODE21"])
+plot(queens_dat["SA4_CODE21"])
+```
+
+Then, when looking at the Queensland Travel Survey dataset, there were a decent amount of trips either starting in, or ending in a SA that looked very different numerically. So I looked to check where they were in relation to Queensland.
+```{r}
+aus_states <- ozmap_data("states")
+queensland<- filter(aus_states, NAME=="Queensland")
+plot(queensland, reset=FALSE, axes = TRUE)
+plot(filter(filter(dat,SA1_CODE21>10401108020), SA1_CODE21<11203155218), add=TRUE)
+```
+As we can see, these statistical units aren't in Queensland at all! So as a result I removed them from the dataset and filtered the trips down to get a more digesible and usable dataset.
+But first I needed to see what trips we needed to remove.
+
+```{r}
+joined_trips_orig<-inner_join(queens_dat, mutate(X5_QTS_TRIPS, "SA1_CODE21"=as.character(ORIGSA1_2021)), by = "SA1_CODE21")
+ggplot(joined_trips_orig["SA1_CODE21"])+geom_sf(data=queensland)+geom_sf(aes(fill="deeppink"))
+
+joined_trips_dest<-inner_join(queens_dat, mutate(X5_QTS_TRIPS, "SA1_CODE21"=as.character(DESTSA1_2021)), by = "SA1_CODE21")
+ggplot(joined_trips_dest["SA1_CODE21"])+geom_sf(data=queensland)+geom_sf(dataset=joined_trips_dest["SA1_CODE21"], aes(fill="deeppink"))
+```
+As we can see from this, the vast majority of trips are located in a small area of Queensland near Brisbane, so we can filter out the trips that don't involve that area. Which we can find the SA codes to by looking back at our previous graphs.
+Additionally, we will remove any trips with duration or distance 0, and any with unrealistically long distances and times.
+
+
+```{r}
+filtered_trips<- filter(filter(X5_QTS_TRIPS, DURATION>0), CUMDIST>0)
+filtered_trips<-filter(filtered_trips, ORIGSA1_2021<=31905152435)
+filtered_trips<-filter(filtered_trips, ORIGSA1_2021>=30000000000)
+filtered_trips<-filter(filtered_trips,ORIGSA1_2021<30200000000)
+filtered_trips<-filter(filtered_trips,DESTSA1_2021<30200000000)
+filtered_trips<-filter(filtered_trips, DESTSA1_2021>=30000000000)
+filtered_trips<-filter(filter(filtered_trips, CUMDIST<750), TRAVTIME<600)
+```
+
+Next, we can deal with a couple additional variables, which will then allow us to find some nice summary statistics about our reduced dataset. These variables are: MAINMODE, which is the primary mode of transportation for the trip, ORIGPURP, DESTPURP, and OVERALL_PURPOSE, which are the purpose of being at the origin of the trip, the desination of the trip, and the overall purpose of the trip in total.
+There are far to many unique values in these variables, so after looking through them, I filtered them down to larger groups.
+```{r}
+unique(unlist(as.list(filtered_trips["MAINMODE"])))
+```
+
+```{r}
+unique(unlist(as.list(filtered_trips["ORIGPURP"])))
+```
+
+```{r}
+unique(unlist(as.list(filtered_trips["DESTPURP"])))
+```
+
+```{r}
+unique(unlist(as.list(filtered_trips["OVERALL_PURPOSE"])))
+```
+
+Now to narrow them down.
+
+```{r}
+filtered_trips<-mutate(mutate(mutate(filtered_trips, OVERALL_PURPOSE=tolower(OVERALL_PURPOSE)), ORIGPURP=tolower(ORIGPURP)), DESTPURP=tolower(DESTPURP))
+l1<-c("pickup/dropoff someone", "pickup/deliver something", "accompany someone")
+l2<-c("direct work commute", "work related")
+l3<-c("recreation","shopping","personal business","social")
+l4<-c("childcare or kindergarten", "education")
+
+filtered_trips<-mutate(filtered_trips, OVERALL_PURPOSE_reduced=case_when(OVERALL_PURPOSE %in% l1 ~ "other person", OVERALL_PURPOSE %in% l2 ~ "work", OVERALL_PURPOSE %in% l3 ~"personal", OVERALL_PURPOSE %in% l4 ~"childcare/education", TRUE ~ "other"))
+
+filtered_trips<-mutate(filtered_trips, ORIGPURP_reduced=case_when(ORIGPURP %in% c("go home","at home") ~ "Home", ORIGPURP %in% c("work (my workplace)", "work (other work reason)") ~ "Work", ORIGPURP %in% c("pick up or drop off a passenger", "just accompanying someone", "social visit","pickup/deliver something (not work-related)") ~"Other person/thing", ORIGPURP %in% c("recreation/leisure activity", "eat/drink", "shopping", "personal business") ~"Personal/Recreation", ORIGPURP %in% c("education", "childcare or kindergarten") ~"childcare/education", TRUE ~ "Other"))
+
+filtered_trips<-mutate(filtered_trips, DESTPURP_reduced=case_when(DESTPURP %in% c("go home","at home") ~ "Home", DESTPURP %in% c("work (my workplace)", "work (other work reason)") ~ "Work", DESTPURP %in% c("pick up or drop off a passenger", "just accompanying someone", "social visit","pickup/deliver something (not work-related)") ~"Other person/thing", DESTPURP %in% c("recreation/leisure activity", "eat/drink", "shopping", "personal business") ~"Personal/Recreation", DESTPURP %in% c("education", "childcare or kindergarten") ~"childcare/education", TRUE ~ "Other"))
+```
+
+Then by selecting we can get a subset of variables to get nice summary statistics.
+
+```{r}
+selected_trips<-select(filtered_trips, TRIPID, ORIGPURP_reduced, DESTPURP_reduced, OVERALL_PURPOSE_reduced, DURATION, TRAVTIME, CUMDIST,MAINMODE)
+summarised<-summarise_all(select(filtered_trips, TRAVTIME, CUMDIST), list(mean=mean, median=median, sd=sd))
+summarised
+```
+
+We can also look at the summary statistics for each of the grouped purposes for origin, destination, and overall.
+```{r}
+group_overallpurpose_summaries<-summarise_all(select(group_by(filtered_trips, OVERALL_PURPOSE_reduced), OVERALL_PURPOSE_reduced, TRAVTIME, CUMDIST), list(mean=mean, median=median, sd=sd))
+group_overallpurpose_summaries
+
+group_origpurpose_summaries<-summarise_all(select(group_by(filtered_trips, ORIGPURP_reduced), ORIGPURP_reduced, TRAVTIME, CUMDIST), list(mean=mean, median=median, sd=sd))
+group_origpurpose_summaries
+
+group_destpurpose_summaries<-summarise_all(select(group_by(filtered_trips, DESTPURP_reduced), DESTPURP_reduced, TRAVTIME, CUMDIST), list(mean=mean, median=median, sd=sd))
+group_destpurpose_summaries
+```
+
+
+We can continue to look at these variables by forming some boxplots.
+The first boxplot we'll look at is the comparison of travel time compared to cumulative distance to see that as expected, these trips take more than a unit of time per unit of distance. (Due to this dataset being from Australia, I'm going to assume minutes and kilometers). Meaning that these are mostly local trips, since the trips are progressing at less than 1 km/m or 60 km/hr.
+
+```{r}
+melted_trips <- melt(filtered_trips, id.vars='TRIPID', measure.vars=c('TRAVTIME', 'CUMDIST'))
+total_box <- ggplot(melted_trips, aes(x=variable, y=value, color=variable)) + geom_boxplot()
+total_box
+```
+
+Next here are box plots of our main attributes when broken down for origin, destination, and overall purpose. As we do not understand what the variable "DURATION" means, we will mostly ignore it, but keep the plots for later use.
+
+```{r}
+dur_box_orig <- ggplot(group_by(selected_trips, ORIGPURP_reduced), aes(x=ORIGPURP_reduced, y=DURATION, fill=ORIGPURP_reduced)) + geom_boxplot() +  theme(
+  axis.title.x = element_blank(),
+  axis.text.x = element_blank(),
+  axis.ticks.x = element_blank()
+  )
+dur_box_orig
+
+trav_box_orig <- ggplot(group_by(selected_trips, ORIGPURP_reduced), aes(x=ORIGPURP_reduced, y=TRAVTIME, fill=ORIGPURP_reduced)) + geom_boxplot() +  theme(
+  axis.title.x = element_blank(),
+  axis.text.x = element_blank(),
+  axis.ticks.x = element_blank()
+  )
+trav_box_orig
+
+dist_box_orig <- ggplot(group_by(selected_trips, ORIGPURP_reduced), aes(x=ORIGPURP_reduced, y=CUMDIST, fill=ORIGPURP_reduced)) + geom_boxplot() +  theme(
+  axis.title.x = element_blank(),
+  axis.text.x = element_blank(),
+  axis.ticks.x = element_blank()
+  )
+
+dist_box_orig
+```
+As we can see here, though most trips are fairly short, there are some categories that have more outlines. Especially when leaving home, people are more likely to travel further. This is pretty expected since people do usually start their trips at home, no matter where they are going 
+On the other hand, people usually just return home from work, making the average trip length starting at work shorter.
+
+
+Next we'll look at destination purpose.
+```{r}
+dur_box_dest <- ggplot(group_by(selected_trips, DESTPURP_reduced), aes(x=DESTPURP_reduced, y=DURATION, fill=DESTPURP_reduced)) + geom_boxplot()+  theme(
+  axis.title.x = element_blank(),
+  axis.text.x = element_blank(),
+  axis.ticks.x = element_blank()
+  )
+dur_box_dest
+
+trav_box_dest <- ggplot(group_by(selected_trips, DESTPURP_reduced), aes(x=DESTPURP_reduced, y=TRAVTIME, fill=DESTPURP_reduced)) + geom_boxplot()+  theme(
+  axis.title.x = element_blank(),
+  axis.text.x = element_blank(),
+  axis.ticks.x = element_blank()
+  )
+trav_box_dest
+
+dist_box_dest <- ggplot(group_by(selected_trips, DESTPURP_reduced), aes(x=DESTPURP_reduced, y=CUMDIST, fill=DESTPURP_reduced)) + geom_boxplot() +  theme(
+  axis.title.x = element_blank(),
+  axis.text.x = element_blank(),
+  axis.ticks.x = element_blank()
+  )
+dist_box_dest
+```
+People are clearly willing to go further to get to work than to other trips. I think that this isn't too unreasonable since people are getting paid to do so.
+
+
+Finally, we have the overall purpose of the trip.
+```{r}
+dur_box_over <- ggplot(group_by(selected_trips, OVERALL_PURPOSE_reduced), aes(x=OVERALL_PURPOSE_reduced, y=DURATION, fill=OVERALL_PURPOSE_reduced)) + geom_boxplot() +  theme(
+  axis.title.x = element_blank(),
+  axis.text.x = element_blank(),
+  axis.ticks.x = element_blank()
+  )
+dur_box_over
+
+trav_box_over <- ggplot(group_by(selected_trips, OVERALL_PURPOSE_reduced), aes(x=OVERALL_PURPOSE_reduced, y=TRAVTIME, fill=OVERALL_PURPOSE_reduced)) + geom_boxplot() +  theme(
+  axis.title.x = element_blank(),
+  axis.text.x = element_blank(),
+  axis.ticks.x = element_blank()
+  )
+trav_box_over
+
+dist_box_over <- ggplot(group_by(selected_trips, OVERALL_PURPOSE_reduced), aes(x=OVERALL_PURPOSE_reduced, y=CUMDIST, fill=OVERALL_PURPOSE_reduced)) + geom_boxplot() +  theme(
+  axis.title.x = element_blank(),
+  axis.text.x = element_blank(),
+  axis.ticks.x = element_blank()
+  )
+
+dist_box_over
+```
+As we've seen so far, the pattern of people being willing to travel more for work continues to be true, with personal trips being the next closest.
+
+All of these results seem very reasonable and hold true with the summary statistics that we looked at earlier.
+
+Next we'll look at the mode of transportation of each of the trips. First of all, there are just far to many for nice summary statistics or plots.
+```{r}
+unique(unlist(as.list(filtered_trips["MAINMODE"])))
+```
+So we can reduce this number as we did with the trip purposes.
+
+```{r}
+selected_trips<-mutate(selected_trips, MAINMODE=case_when(MAINMODE %in% c("Car driver","Car passenger", "Taxi", "Truck driver", "Truck passenger", "Motorcycle driver", "Motorcycle passenger") ~ "Drive/Ride", MAINMODE %in% c("Charter/Courtesy/Other bus", "Public bus", "School bus (private/chartered)","School bus (with route number)") ~ "Bus", MAINMODE %in% c("Bicycle", "E-bike or E-scooter") ~"Bike/similar", MAINMODE %in% c("Ferry", "Train") ~"Other group transport", TRUE ~ "Walking/Alternative"))
+```
+
+
+We can now look at summary statistics and boxplots.
+
+```{r}
+group_mode_summaries<-summarise_all(select(group_by(selected_trips, MAINMODE), MAINMODE, TRAVTIME, CUMDIST), list(mean=mean, median=median, sd=sd))
+group_mode_summaries
+```
+The travel time and distance are unsurprising based on the fact that the "Other Group Transport" is purely a couple of trips via ferry or train. So clearly the furthest trips on average. This is of course followed by cars, then biking, then walking.
+
+
+
+```{r}
+trav_box_mode <- ggplot(group_by(selected_trips, MAINMODE), aes(x=MAINMODE, y=TRAVTIME, fill=MAINMODE)) + geom_boxplot() +  theme(
+  axis.title.x = element_blank(),
+  axis.text.x = element_blank(),
+  axis.ticks.x = element_blank()
+  )
+trav_box_mode
+
+dist_box_mode <- ggplot(group_by(selected_trips, MAINMODE), aes(x=MAINMODE, y=CUMDIST, fill=MAINMODE)) + geom_boxplot() +  theme(
+  axis.title.x = element_blank(),
+  axis.text.x = element_blank(),
+  axis.ticks.x = element_blank()
+  )
+
+dist_box_mode
+```
+
+The analysis from the summary statistics is clearly reflected in the boxplots, though we can see since there are so few Ferry and Train trips, the boxplot is very simple, as for car riding, we can see that there are some very long car trips.
+
+
+Now to return to the SA's themselves, we want to see just how small these SA1's are.
+```{r}
+names(which.max(table(filtered_trips$ORIGSA1_2021)))
+ggplot(filter(queens_dat, SA1_CODE21==30101100416)["SA1_CODE21"])+geom_sf(data=filter(queens_dat, SA1_CODE21<30101101000))+geom_sf(aes(fill="deeppink"))
+ggplot(queensland)+geom_sf()+geom_sf(data=filter(queens_dat, SA4_NAME21=="Brisbane - East"), fill="deeppink")
+ggplot(filter(queens_dat, SA1_CODE21==30101100416))+geom_sf(fill="deeppink")
+```
+We first found the most frequently appearing SA1 in the origin variable, which when we try to see where this SA1 is, where we can see that it is so small it doesn't even appear on the Queensland map.
+
+As we want to look at the these trips in particular, we need to see how many origins and destinations there are. Additionally, I looked at the number of unique households in the dataset.
+
+```{r}
+length(unique(unlist(as.list(filtered_trips["HHID"]))))
+length(unique(unlist(as.list(filtered_trips["ORIGSA1_2021"]))))
+length(unique(unlist(as.list(filtered_trips["DESTSA1_2021"]))))
+```
+
+Next we look at where exactly these origin and destinations are in a map of Queensland.
+
+```{r}
+joined_trips_orig<-inner_join(queens_dat, mutate(filtered_trips, "SA1_CODE21"=as.character(ORIGSA1_2021)), by = "SA1_CODE21")
+ggplot(joined_trips_orig["SA1_CODE21"])+geom_sf(data=queensland)+geom_sf(aes(color="deeppink"))
+
+joined_trips_dest<-inner_join(queens_dat, mutate(filtered_trips, "SA1_CODE21"=as.character(DESTSA1_2021)), by = "SA1_CODE21")
+ggplot(joined_trips_dest["SA1_CODE21"])+geom_sf(data=queensland)+geom_sf(data=joined_trips_dest["SA1_CODE21"], aes(color="deeppink"))
+```
+
+As we can see, these are in a very small area and thankfully the same area! So we can zoom in on this area to see what exactly we're working with.
+
+```{r}
+test_trips<-filter(joined_trips_dest,SA4_CODE21<302)
+test2<-filter(test_trips, SA1_CODE21>31000000000)
+ggplot(test_trips["SA1_CODE21"])+geom_sf(aes(fill="deeppink"))
+```
+These are the very zoomed in SA1's that we will be working with for the rest of the project.
+
+Next, after FAR too much work I finally managed to get some very basic desire lines, which resemble this map, so I'm pretty sure they work!
+
+```{r}
+list_try<-list(possible=as.list(unique(unlist(c(as.list(filtered_trips["ORIGSA1_2021"]))))))
+list_try2<- list(possible=as.list(unique(unlist(c(as.list(filtered_trips["DESTSA1_2021"]))))))
+possible<-as.data.frame(t(data.frame(list_try)))
+possible2<-as.data.frame(t(data.frame(list_try2)))
+possible<-mutate(possible, ORIGSA1_2021= V1)
+possible2<-mutate(possible2, DESTSA1_2021= V1)
+
+for_geom_orig<-left_join(mutate(possible, ORIGSA1_2021= V1),joined_trips_orig, by="ORIGSA1_2021")
+for_geom_dest<-left_join(mutate(possible2, DESTSA1_2021= V1),joined_trips_dest, by="DESTSA1_2021")
+
+od_intra = filter(filtered_trips, ORIGSA1_2021 == DESTSA1_2021)
+od_inter = filter(filtered_trips, ORIGSA1_2021 != DESTSA1_2021)
+od_inter<-select(mutate(mutate(od_inter, o=ORIGSA1_2021),d=DESTSA1_2021), o, d, ORIGPLACE, ORIGPURP, DESTPLACE, DESTPURP, MAINMODE, MODE1, TRAVTIME, CUMDIST,OVERALL_PURPOSE_reduced)
+zones1=full_join(select(for_geom_orig, V1, geometry), select(for_geom_dest, V1, geometry), by=c("V1","geometry"))
+zones_sf <- st_as_sf(zones1)
+zones2<-unique(zones1)
+#zones2<-select(mutate(zones2, geometry=geometry.x), V1, geometry)
+zones_sf2<-st_as_sf(zones2)
+desire_lines = od2line(od_inter, zones_sf2)
+qtm(desire_lines, color = "o")
+```
+
+Finally, we'll how many destinations there are per origin, and vice versa, for future use.
+
+
+```{r}
+testy<-filtered_trips %>% group_by(ORIGSA1_2021)%>% count(DESTSA1_2021)
+orig_amounts<-summarise(group_by(testy, ORIGSA1_2021), n_distinct(DESTSA1_2021))
+orig_amounts
+```
+
+```{r}
+testy<-filtered_trips %>% group_by(DESTSA1_2021)%>% count(ORIGSA1_2021)
+dest_amounts<-summarise(group_by(testy, DESTSA1_2021), n_distinct(ORIGSA1_2021))
+dest_amounts
+```
+
+PS, here is what duration looks like in comparison to travel time:
+```{r}
+ggplot(filtered_trips)+geom_point(aes(x=TRAVTIME, y=DURATION))
+```
+
+
+
+For the Winter, we need to make the desire lines more complex and easier to digest. Then, we'll use the desire lines and other knowledge about the origins and destinations to use imputation to guess where some trips are going so we can eventually use it for the dataset we eventually want.
+
+
+
+
+Important code taken/learned from:
+https://r.geocompx.org/
+and various r documentation.
+Data from:
+https://www.data.qld.gov.au/dataset/queensland-household-travel-survey-series
